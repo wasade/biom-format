@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 
-from numpy import zeros, ndarray, array
+from numpy import zeros, ndarray, array, uint32, argsort, take
 from biom.unit_test import TestCase, main
 from biom.table import flatten
 from biom.csmat import CSMat, to_csmat, \
@@ -132,15 +132,26 @@ class CSMatTests(TestCase):
         self.obj.absorbUpdates()
         self.assertEqual(self.obj._order, "csr")
         self.assertEqual(self.obj._pkd_ax, [0,3,4,6])
-        self.assertEqual(self.obj._unpkd_ax, [0,1,3,2,0,3])
-        self.assertEqual(self.obj._values, [1,2,-10,3,50,4])
+
+        obs_indices = argsort(self.obj._unpkd_ax)
+        obs_unpkd_ax = take(self.obj._unpkd_ax, obs_indices)
+        obs_values = take(self.obj._values, obs_indices)
+        
+        exp_unsorted_unpkd_ax = [0,1,3,2,0,3]
+        exp_unsorted_values = [1,2,-10,3,50,4]
+        exp_indices = argsort(exp_unsorted_unpkd_ax)
+        exp_unpkd_ax = take(exp_unsorted_unpkd_ax, exp_indices)
+        exp_values = take(exp_unsorted_values, exp_indices)
+
+        self.assertEqual(obs_unpkd_ax, exp_unpkd_ax)
+        self.assertEqual(obs_values, exp_values)
 
     def test_setitem(self):
         self.obj[(2,2)] = 10
         exp = sorted([((0,0),1),((0,1),2),((2,2),10),((1,2),3),((2,3),4)])
         self.assertEqual(sorted(self.obj.items()), exp)
         self.assertRaises(IndexError, self.obj.__setitem__, (100,50), 10)
-        self.assertRaises(ValueError, self.empty_cols.__setitem__, [3,2], 0)
+        self.assertRaises(ValueError, self.empty_cols.__setitem__, (3,2), 0)
 
         self.empty_cols.convert("csr")
         self.empty_cols[(2,2)] = 42
@@ -154,7 +165,7 @@ class CSMatTests(TestCase):
         self.assertEqual(self.obj[1,1], 0)
         self.assertRaises(IndexError, self.obj.__getitem__, (3,3))
         self.assertRaises(IndexError, self.obj.__getitem__, (-1,2))
-        self.assertRaises(IndexError, self.obj.__getitem__, 1)
+        self.assertRaises(TypeError, self.obj.__getitem__, 1)
 
     def test_getitem_slice(self):
         """Tests for slices on getitem"""
@@ -376,12 +387,11 @@ class CSMatTests(TestCase):
         exp.update({(0,2):3})
         obs = self.obj.getRow(1)
         self.assertEqual(obs, exp)
-
+        
         exp = CSMat(1,4)
         obs = self.obj.getRow(2)
         exp.update({(0,3):4})
         self.assertEqual(obs,exp)
-
         obj = CSMat(4,1)
         obj[0,0] = 5
         obj[1,0] = 6
@@ -406,7 +416,7 @@ class CSMatTests(TestCase):
         self.assertEqual(obs3, exp3)
         self.assertEqual(obs4, exp4)
 
-        self.assertRaises(IndexError, self.obj.getRow, -1)
+        self.assertRaises(OverflowError, self.obj.getRow, -1)
 
         # Test matrices with empty rows.
         exp = CSMat(1, 4)
@@ -447,7 +457,7 @@ class CSMatTests(TestCase):
         obs = self.obj.getCol(1)
         self.assertEqual(obs,exp)
 
-        self.assertRaises(IndexError, self.obj.getCol, -1)
+        self.assertRaises(OverflowError, self.obj.getCol, -1)
 
         # Test matrices with empty columns.
         exp = CSMat(4, 1)
@@ -499,12 +509,17 @@ class CSMatTests(TestCase):
     def test_transpose(self):
         """test transpose"""
         exp = CSMat(4,3)
-        exp.update({(0,0):1,(1,0):2,(2,1):3,(3,2):4})
+        from numpy import uint32
+        exp.update({(0,0):uint32(1),
+                    (1,0):uint32(2),
+                    (2,1):uint32(3),
+                    (3,2):uint32(4)})
         obs = self.obj.T
         self.assertEqual(obs, exp)
 
         exp = CSMat(3, 4)
-        exp.update({(2,1):1,(2,3):3})
+        exp.update({(uint32(2),uint32(1)):uint32(1),
+                    (uint32(2),uint32(3)):uint32(3)})
         obs = self.empty_cols.T
         self.assertEqual(obs, exp)
 
@@ -854,6 +869,7 @@ class CSMatTests(TestCase):
         """convert csc to csr"""
         self.obj.convert("csc")
         self.obj.convert("csr")
+        
         self.assertEqual(self.obj._order, "csr")
         self.assertEqual(self.obj._coo_values, [])
         self.assertEqual(self.obj._coo_rows, [])
@@ -954,31 +970,33 @@ class CSMatTests(TestCase):
 
     def test_expand_compressed(self):
         """expand a compressed axis"""
-        exp = [0,0,1,1,1,2,2,2,3,3]
-        obs = self.obj._expand_compressed([0,2,5,8,10])
+        # 0, 0, 0, 0, 0, 1, 1, 1, 2, 2]
+        exp = array([0,0,1,1,1,2,2,2,3,3], dtype=uint32)
+        obs = self.obj._expand_compressed(array([0,2,5,8,10], dtype=uint32))
         self.assertEqual(obs,exp)
 
-        exp = [1,1,1,1,1,2,2,2,3,3]
-        obs = self.obj._expand_compressed([0,0,5,8,10])
+        exp = array([1,1,1,1,1,2,2,2,3,3], dtype=uint32)
+        obs = self.obj._expand_compressed(array([0,0,5,8,10], dtype=uint32))
         self.assertEqual(obs,exp)
 
-        exp = [0,0,2,2,2,2,2,2,3,3]
-        obs = self.obj._expand_compressed([0,2,2,8,10])
+        exp = array([0,0,2,2,2,2,2,2,3,3], dtype=uint32)
+        obs = self.obj._expand_compressed(array([0,2,2,8,10], dtype=uint32))
         self.assertEqual(obs,exp)
 
-        exp = [0,0,1,1,1,2,2,2,2,2]
-        obs = self.obj._expand_compressed([0,2,5,10,10])
+        exp = array([0,0,1,1,1,2,2,2,2,2], dtype=uint32)
+        obs = self.obj._expand_compressed(array([0,2,5,10,10], dtype=uint32))
         self.assertEqual(obs,exp)
 
-        exp = [0,0,1,1,1,1,1,1,1,1]
-        obs = self.obj._expand_compressed([0,2,10,10,10])
+        exp = array([0,0,1,1,1,1,1,1,1,1], dtype=uint32)
+        obs = self.obj._expand_compressed(array([0,2,10,10,10], dtype=uint32))
         self.assertEqual(obs,exp)
 
-        exp = []
-        obs = self.obj._expand_compressed([0,0,0,0,0])
+        exp = array([], dtype=uint32)
+        obs = self.obj._expand_compressed(array([0,0,0,0,0], dtype=uint32))
         self.assertEqual(obs,exp)
 
-
+    def test_cs_pack(self):
+        self.fail("needs test for _cs_pack")
 class SupportTests(TestCase):
     def test_list_list_to_csmat(self):
         """convert [[row,col,value], ...] to csmat"""
@@ -990,7 +1008,7 @@ class SupportTests(TestCase):
 
     def test_nparray_to_csmat(self):
         """Convert nparray to csmat"""
-        input = array([[1,2,3,4],[-1,6,7,8],[9,10,11,12]])
+        input = array([[1,2,3,4],[-1,6,7,8],[9,10,11,12]],dtype=float)
         exp = CSMat(3,4)
         exp.update({(0,0):1,(0,1):2,(0,2):3,(0,3):4,
                           (1,0):-1,(1,1):6,(1,2):7,(1,3):8,

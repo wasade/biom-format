@@ -6,6 +6,7 @@ from operator import itemgetter
 from biom.util import flatten
 from biom.exception import TableException
 from itertools import izip
+from biom._csmat import CSMat, nparray_to_csmat, list_csmat_to_csmat
 
 __author__ = "Daniel McDonald"
 __copyright__ = "Copyright 2012, BIOM-Format Project"
@@ -16,7 +17,7 @@ __version__ = "1.1.1-dev"
 __maintainer__ = "Daniel McDonald"
 __email__ = "daniel.mcdonald@colorado.edu"
 
-class CSMat():
+class PyCSMat():
     """Compressed sparse (CSR/CSC) and coordinate list (COO) formats.
 
     Builds sparse matrix in COO format first (good for incremental
@@ -635,10 +636,10 @@ def list_list_to_csmat(data, dtype=float, shape=None):
         n_rows, n_cols = shape
 
     mat = CSMat(n_rows, n_cols)
-    mat.bulkCOOUpdate(rows, cols, values)
+    mat.bulkCOOUpdate(list(rows), list(cols), list(values))
     return mat
 
-def nparray_to_csmat(data, dtype=float):
+def py_nparray_to_csmat(data, dtype=float):
     """Convert a numpy array to a CSMat"""
     rows = []
     cols = []
@@ -681,7 +682,7 @@ def list_nparray_to_csmat(data, dtype=float):
     mat.bulkCOOUpdate(rows, cols, values)
     return mat
 
-def list_csmat_to_csmat(data, dtype=float):
+def py_list_csmat_to_csmat(data, dtype=float):
     """Takes a list of CSMats and creates a CSMat"""
     if isinstance(data[0], CSMat):
         if data[0].shape[0] > data[0].shape[1]:

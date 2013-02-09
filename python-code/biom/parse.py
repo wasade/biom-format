@@ -308,7 +308,7 @@ def parse_biom_table(json_fh,constructor=None, try_light_parse=True):
     BIOM parser.
     """
     table_str = ''.join(json_fh)
-
+     
     if try_light_parse:
         try:
             t = light_parse_biom_sparse(table_str, constructor)

@@ -51,7 +51,7 @@ GigaScience, accepted 2012.
 if cython_present:
     from subprocess import Popen, PIPE
     from os import system
-    system('cython %s/_sparsemat.pyx -o %s/_sparsemat.cpp --cplus' % (support_code_path, support_code_path))
+    system('cython %s/_csmat.pyx -o %s/_csmat.c' % (support_code_path, support_code_path))
 
     gcc_version = map(int, Popen('gcc -dumpversion', shell=True, stdout=PIPE).stdout.read().split('.'))
     if gcc_version[0] == 4 and gcc_version[1] > 2:
@@ -74,13 +74,12 @@ if cython_present:
         data_files={},
         long_description=long_description,
         ext_modules=[Extension(
-                   "biom._sparsemat",
-                   sources=['python-code/support-code/_sparsemat.cpp',
-                            'python-code/support-code/sparsemat_lib.cpp'],
-                   language="c++",
+                   "biom._csmat",
+                   sources=['python-code/support-code/_csmat.c'],
+                   language="c",
                    extra_compile_args=extra_compile_args,
                    library_dirs=[library_path],
-                   include_dirs=[])],
+                   include_dirs=[numpy.get_include()])],
         cmdclass={'build_ext': build_ext}
         )
 else:
