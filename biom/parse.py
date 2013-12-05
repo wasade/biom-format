@@ -20,6 +20,8 @@ from biom.table import SparseOTUTable, DenseOTUTable, SparsePathwayTable, \
 import json
 from numpy import zeros, asarray, uint32, float64
 from string import strip
+import h5py
+from scipy.sparse import coo_matrix
 
 __author__ = "Justin Kuczynski"
 __copyright__ = "Copyright 2011-2013, The BIOM Format Development Team"
@@ -300,6 +302,31 @@ def light_parse_biom_sparse(biom_str, constructor):
 
     return t
 
+def parse_biom_table_hdf5(fp):
+    table_f = h5py.File(fp, 'r')
+
+    obs_ids = table_f['observations/ids'].value
+    if 'observations/metadata' in table_f:
+        obs_md = json.loads(table_f['observations/metadata'].value)
+
+    sample_ids = table_f['samples/ids'].value
+    if 'samples/metadata' in table_f:
+        sample_md = json.loads(table_f['samples/metadata'].value)
+
+    table_id = table_f.attrs['id']
+    table_type = table_f.attrs['type']
+
+    sparse_obj = SparseObj(*table_f.attrs['shape'])
+    data_grp = table_f['data']
+    sparse_obj._matrix = coo_matrix((data_grp['values'].value,
+                                    (data_grp['rows'].value,
+                                     data_grp['columns'].value)),
+                                    shape=table_f.attrs['shape'])
+    table_f.close()
+    
+    return SparseOTUTable(sparse_obj, sample_ids, obs_ids, 
+               sample_md, obs_md, table_id)
+
 def parse_biom_table(json_fh,constructor=None, try_light_parse=True):
     """parses a biom format otu table into a rich otu table object
 
@@ -357,6 +384,7 @@ def parse_biom_otu_table(json_table, constructor=None, data_pump=None):
 
     Constructor must have a _biom_type of "otu table"
     """
+    id_ = json_table['id']
     table_type = 'otu table'
     mat_type = json_table['matrix_type']
     constructors = [SparseOTUTable, DenseOTUTable]
@@ -370,13 +398,13 @@ def parse_biom_otu_table(json_table, constructor=None, data_pump=None):
 
     if data_pump is None:
         table_obj = table_factory(json_table['data'], sample_ids, obs_ids, 
-                                  sample_metadata, obs_metadata, 
+                                  sample_metadata, obs_metadata, id_,
                                   constructor=constructor, 
                                   shape=json_table['shape'], 
                                   dtype=dtype)
     else:
         table_obj = table_factory(data_pump, sample_ids, obs_ids, 
-                                  sample_metadata, obs_metadata, 
+                                  sample_metadata, obs_metadata, id_,
                                   constructor=constructor, 
                                   shape=json_table['shape'], 
                                   dtype=dtype)
