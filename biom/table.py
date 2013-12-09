@@ -1466,30 +1466,48 @@ class Table(object):
         # from Jai's protobiom.hdf5
         out_f = h5py.File(fp, 'w')
 
+        # header attributes
         out_f.attrs['id'] = self.TableId
-        out_f.attrs['format'] = "Biological Observation Matrix 2.0.0"
+        out_f.attrs['format_version'] = array([2,0])
         out_f.attrs['format_url'] = "http://biom-format.org"
-        out_f.attrs['type'] = self._biom_type
+        out_f.attrs['type'] = self.Type
         out_f.attrs['generated_by'] = generated_by
-        out_f.attrs['date'] = datetime.now().isoformat()
-        out_f.attrs['matrix_element_type'] = self._data._matrix.dtype.name
+        out_f.attrs['creation_date'] = datetime.now().isoformat()
         out_f.attrs['shape'] = self._data.shape
 
-        obs_grp = out_f.create_group('observations')
-        obs_grp['ids'] = asarray(map(str, self.ObservationIds))
-        if self.ObservationMetadata is not None:
-            obs_grp['metadata'] = dumps(self.ObservationMetadata)
+        # contruct observation groups
+        o_grp = out_f.create_group('observations')
+        o_col_grp = o_grp.create_group('collection-metadata')
+        o_ind_grp = o_grp.create_group('individual-metadata')
+        o_tree_grp = o_grp.create_group('collection-metadata/tree')
+        o_hier_grp = o_grp.create_group('individual-metadata/hierarchy')
+        o_hiers_grp = o_grp.create_group('individual-metadata/hierarchies')
 
-        samp_grp = out_f.create_group('samples')
-        samp_grp['ids'] = asarray(map(str, self.SampleIds))
-        if self.SampleMetadata is not None:
-            samp_grp['metadata'] = dumps(self.SampleMetadata)
+        # construct sample groups
+        s_grp = out_f.create_group('samples')
+        s_col_grp = s_grp.create_group('collection-metadata')
+        s_ind_grp = s_grp.create_group('individual-metadata')
+        s_tree_grp = s_grp.create_group('collection-metadata/tree')
+        s_dist_grp = s_grp.create_group('collection-metadata/distance-matrix')
+        s_adiv_grp = samp_ind_grp.create_group('alphadiv')
+        
+        # store identifiers
+        o_grp['ids'] = asarray(map(str, self.ObservationIds))
+        s_grp['ids'] = asarray(map(str, self.SampleIds))
 
+        # store metadata
+        for k in self.SampleMetadata[0]:
+            self._write_metadata(s_ind_grp, k)
+        
+        for k in self.ObservationMetadata[0]:
+            self._write_metadata(o_ind_grp, k)
+
+        # store matrix data
         self._data._matrix = self._data._matrix.tocoo()
         data_grp = out_f.create_group('data')
         data_grp.create_dataset('rows', data=self._data._matrix.row)
-        data_grp.create_dataset('columns', data=self._data._matrix.col)
-        data_grp.create_dataset('values', data=self._data._matrix.data)
+        data_grp.create_dataset('cols', data=self._data._matrix.col)
+        data_grp.create_dataset('vals', data=self._data._matrix.data)
 
         out_f.close()
 
