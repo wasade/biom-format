@@ -173,11 +173,12 @@ Bacteria; Bacteroidetes   1.0 1.0 0.0 1.0
 
 import numpy as np
 import scipy.stats
+import h5py
 from copy import deepcopy
 from datetime import datetime
-from json import dumps
+from json import dumps as _json_dumps, JSONEncoder
 from functools import reduce, partial
-from operator import itemgetter, or_
+from operator import itemgetter
 from collections import defaultdict
 from collections.abc import Hashable, Iterable
 from numpy import ndarray, asarray, zeros, newaxis
@@ -189,7 +190,7 @@ from biom.exception import (TableException, UnknownAxisError, UnknownIDError,
                             DisjointIDError)
 from biom.util import (get_biom_format_version_string,
                        get_biom_format_url_string, flatten, natsort,
-                       prefer_self, index_list, H5PY_VLEN_STR, HAVE_H5PY,
+                       prefer_self, index_list, H5PY_VLEN_STR,
                        __format_version__)
 from biom.err import errcheck
 from ._filter import _filter
@@ -211,6 +212,22 @@ __email__ = "daniel.mcdonald@colorado.edu"
 
 MATRIX_ELEMENT_TYPE = {'int': int, 'float': float, 'unicode': str,
                        'int': int, 'float': float, 'unicode': str}
+
+
+# NpEncoder from:
+# https://stackoverflow.com/a/57915246/19741
+class NpEncoder(JSONEncoder):
+    def default(self, obj):
+        if isinstance(obj, np.integer):
+            return int(obj)
+        if isinstance(obj, np.floating):
+            return float(obj)
+        if isinstance(obj, np.ndarray):
+            return obj.tolist()
+        return super(NpEncoder, self).default(obj)
+
+
+dumps = partial(_json_dumps, cls=NpEncoder)
 
 
 def _identify_bad_value(dtype, fields):
@@ -372,7 +389,6 @@ def vlen_list_of_str_formatter(grp, header, md, compression):
 
 
 class Table:
-
     """The (canonically pronounced 'teh') Table.
 
     Give in to the power of the Table!
@@ -387,15 +403,15 @@ class Table:
     data : array_like
         An (N,M) sample by observation matrix represented as one of these
         types:
-            An 1-dimensional array of values
-            An n-dimensional array of values
-            An empty list
-            A list of numpy arrays
-            A list of dict
-            A list of sparse matrices
-            A dictionary of values
-            A list of lists
-            A sparse matrix of values
+        * An 1-dimensional array of values
+        * An n-dimensional array of values
+        * An empty list
+        * A list of numpy arrays
+        * A list of dict
+        * A list of sparse matrices
+        * A dictionary of values
+        * A list of lists
+        * A sparse matrix of values
     observation_ids : array_like of str
         A (N,) dataset of the observation IDs, where N is the total number
         of IDs
@@ -410,8 +426,7 @@ class Table:
         metadata field that contains sample specific metadata information, ie
     table_id : str, optional
         A field that can be used to identify the table
-    type : {None, "OTU table", "Pathway table", "Function table",
-            "Ortholog table", "Gene table", "Metabolite table", "Taxon table"}
+    type : str, see notes
         The type of table represented
     create_date : str, optional
         Date that this table was built
@@ -435,6 +450,11 @@ class Table:
     create_date
     generated_by
     format_version
+
+    Notes
+    -----
+    Allowed table types are None, "OTU table", "Pathway table", "Function
+    table", "Ortholog table", "Gene table", "Metabolite table", "Taxon table"
 
     Raises
     ------
@@ -1414,6 +1434,12 @@ class Table:
 
             updated_ids[idx] = id_map.get(old_id, old_id)
 
+        # see issue #892, this protects against modifying inplace with bad
+        # duplicate identifiers
+        if inplace:
+            if len(updated_ids) != len(set(updated_ids)):
+                raise TableException("Duplicate IDs observed")
+
         # prepare the result object and update the ids along the specified
         # axis
         result = self if inplace else self.copy()
@@ -1424,7 +1450,7 @@ class Table:
 
         result._index_ids(None, None)
 
-        # check for errors (specifically, we want to esnsure that duplicate
+        # check for errors (specifically, we want to ensure that duplicate
         # ids haven't been introduced)
         errcheck(result)
 
@@ -2871,7 +2897,8 @@ class Table:
 
         return max_val
 
-    def subsample(self, n, axis='sample', by_id=False, with_replacement=False):
+    def subsample(self, n, axis='sample', by_id=False, with_replacement=False,
+                  seed=None):
         """Randomly subsample without replacement.
 
         Parameters
@@ -2889,6 +2916,8 @@ class Table:
             If `False` (default), subsample without replacement. If `True`,
             resample with replacement via the multinomial distribution.
             Should not be `True` if `by_id` is `True`.
+        seed : int, optional
+            If provided, set the numpy random seed with this value
 
         Returns
         -------
@@ -2949,14 +2978,16 @@ class Table:
 
         table = self.copy()
 
+        rng = np.random.default_rng(seed)
+
         if by_id:
             ids = table.ids(axis=axis).copy()
-            np.random.shuffle(ids)
+            rng.shuffle(ids)
             subset = set(ids[:n])
             table.filter(lambda v, i, md: i in subset, axis=axis)
         else:
             data = table._get_sparse_data()
-            _subsample(data, n, with_replacement)
+            _subsample(data, n, with_replacement, rng)
             table._data = data
 
             table.filter(lambda v, i, md: v.sum() > 0, axis=axis)
@@ -3607,54 +3638,57 @@ class Table:
         tables = [self] + others
 
         # gather all identifiers across tables
-        all_features = reduce(or_, [set(t.ids(axis='observation'))
-                                    for t in tables])
-        all_samples = reduce(or_, [set(t.ids()) for t in tables])
+        all_features = set(np.hstack([t.ids(axis='observation')
+                                      for t in tables]))
+        all_samples = set(np.hstack([t.ids() for t in tables]))
+
+        # produce a new stable order
+        feature_order = sorted(all_features)
+        sample_order = sorted(all_samples)
 
         # generate unique integer ids for the identifiers, and let's order
         # it to be polite
-        feature_map = {i: idx for idx, i in enumerate(sorted(all_features))}
-        sample_map = {i: idx for idx, i in enumerate(sorted(all_samples))}
+        feature_map = {i: idx for idx, i in enumerate(feature_order)}
+        sample_map = {i: idx for idx, i in enumerate(sample_order)}
 
-        # produce a new stable order
-        get1 = lambda x: x[1]  # noqa
-        feature_order = [k for k, v in sorted(feature_map.items(), key=get1)]
-        sample_order = [k for k, v in sorted(sample_map.items(), key=get1)]
+        ntuples = sum([t.nnz for t in tables])
 
-        mi = []
-        values = []
+        # we're going to aggregate in COO. per scipy, it is efficient for
+        # construction of large matrices. importantly, it allows for
+        # duplicates which in this case correspond to multiple values for
+        # the same sample/feature across tables. the duplicates are summed
+        # implicitly on conversion to csr/csc.
+        rows = np.empty(ntuples, dtype=np.int32)
+        cols = np.empty(ntuples, dtype=np.int32)
+        data = np.empty(ntuples, dtype=self.matrix_data.dtype)
+
+        offset = 0
         for table in tables:
-            # these data are effectively [((row_index, col_index), value), ]
-            data_as_dok = table.matrix_data.todok()
+            t_nnz = table.nnz
 
-            # construct a map of the feature integer index to what it is in
-            # the full table
-            feat_ids = table.ids(axis='observation')
-            samp_ids = table.ids()
-            table_features = {idx: feature_map[i]
-                              for idx, i in enumerate(feat_ids)}
-            table_samples = {idx: sample_map[i]
-                             for idx, i in enumerate(samp_ids)}
+            coo = table.matrix_data.tocoo()
 
-            for (f, s), v in data_as_dok.items():
-                # collect the indices and values, adjusting the indices as we
-                # go
-                mi.append((table_features[f], table_samples[s]))
-                values.append(v)
+            # we need to map the index positions in the current table to the
+            # index positions in the full matrix
+            row_map = np.array([feature_map[i]
+                                for i in table.ids(axis='observation')],
+                               dtype=np.int32)
+            col_map = np.array([sample_map[i]
+                                for i in table.ids()],
+                               dtype=np.int32)
+            coo.row = row_map[coo.row]
+            coo.col = col_map[coo.col]
 
-        # construct a multiindex of the indices where the outer index is the
-        # feature and the inner index is the sample
-        mi = pd.MultiIndex.from_tuples(mi)
-        grouped = pd.Series(values, index=mi)
+            # store our coo data
+            rows[offset:offset + t_nnz] = coo.row
+            cols[offset:offset + t_nnz] = coo.col
+            data[offset:offset + t_nnz] = coo.data
+            offset += t_nnz
 
-        # aggregate the values where the outer and inner values in the
-        # multiindex are the same
-        collapsed_rcv = grouped.groupby(level=[0, 1]).sum()
+        coo = coo_matrix((data, (rows, cols)),
+                         shape=(len(feature_order), len(sample_order)))
 
-        # convert into a representation understood by the Table constructor
-        list_list = [[r, c, v] for (r, c), v in collapsed_rcv.items()]
-
-        return self.__class__(list_list, feature_order, sample_order)
+        return self.__class__(coo.tocsr(), feature_order, sample_order)
 
     def merge(self, other, sample='union', observation='union',
               sample_metadata_f=prefer_self,
@@ -3675,8 +3709,10 @@ class Table:
         other : biom.Table or Iterable of Table
             The other table to merge with this one. If an iterable, the tables
             are expected to not have metadata.
-        sample : {'union', 'intersection'}, optional
-        observation : {'union', 'intersection'}, optional
+        sample : 'union', 'intersection', optional
+            How the sample axis is handled
+        observation : 'union', 'intersection', optional
+            How the observation axis is handled
         sample_metadata_f : function, optional
             Defaults to ``biom.util.prefer_self``. Defines how to handle sample
             metadata during merge.
@@ -3920,60 +3956,38 @@ class Table:
         Notes
         -----
         The expected HDF5 group structure is below. An example of an HDF5 file
-        in DDL can be found here [3]_.
+        in DDL can be found here [1]_.
 
-        - ./id                                                  : str, an \
-arbitrary ID
-        - ./type                                                : str, the \
-table type (e.g, OTU table)
-        - ./format-url                                          : str, a URL \
-that describes the format
-        - ./format-version                                      : two element \
-tuple of int32, major and minor
-        - ./generated-by                                        : str, what \
-generated this file
-        - ./creation-date                                       : str, ISO \
-format
-        - ./shape                                               : two element \
-tuple of int32, N by M
-        - ./nnz                                                 : int32 or \
-int64, number of non zero elems
-        - ./observation                                         : Group
-        - ./observation/ids                                     : (N,) dataset\
- of str or vlen str
-        - ./observation/matrix                                  : Group
-        - ./observation/matrix/data                             : (nnz,) \
-dataset of float64
-        - ./observation/matrix/indices                          : (nnz,) \
-dataset of int32
-        - ./observation/matrix/indptr                           : (M+1,) \
-dataset of int32
-        - ./observation/metadata                                : Group
-        - [./observation/metadata/foo]                          : Optional, \
-(N,) dataset of any valid HDF5 type in index order with IDs.
-        - ./observation/group-metadata                          : Group
-        - [./observation/group-metadata/foo]                    : Optional, \
-(?,) dataset of group metadata that relates IDs
-        - [./observation/group-metadata/foo.attrs['data_type']] : attribute of\
- the foo dataset that describes contained type (e.g., newick)
-        - ./sample                                              : Group
-        - ./sample/ids                                          : (M,) dataset\
- of str or vlen str
-        - ./sample/matrix                                       : Group
-        - ./sample/matrix/data                                  : (nnz,) \
-dataset of float64
-        - ./sample/matrix/indices                               : (nnz,) \
-dataset of int32
-        - ./sample/matrix/indptr                                : (N+1,) \
-dataset of int32
-        - ./sample/metadata                                     : Group
-        - [./sample/metadata/foo]                               : Optional, \
-(M,) dataset of any valid HDF5 type in index order with IDs.
-        - ./sample/group-metadata                               : Group
-        - [./sample/group-metadata/foo]                         : Optional, \
-(?,) dataset of group metadata that relates IDs
-        - [./sample/group-metadata/foo.attrs['data_type']]      : attribute of\
- the foo dataset that describes contained type (e.g., newick)
+        - ./id                                                  : str, an arbitrary ID  # noqa
+        - ./type                                                : str, the table type (e.g, OTU table)  # noqa
+        - ./format-url                                          : str, a URL that describes the format  # noqa
+        - ./format-version                                      : two element tuple of int32, major and minor  # noqa
+        - ./generated-by                                        : str, what generated this file  # noqa
+        - ./creation-date                                       : str, ISO format  # noqa
+        - ./shape                                               : two element tuple of int32, N by M  # noqa
+        - ./nnz                                                 : int32 or int64, number of non zero elems  # noqa
+        - ./observation                                         : Group  # noqa
+        - ./observation/ids                                     : (N,) dataset of str or vlen str  # noqa
+        - ./observation/matrix                                  : Group  # noqa
+        - ./observation/matrix/data                             : (nnz,) dataset of float64  # noqa
+        - ./observation/matrix/indices                          : (nnz,) dataset of int32  # noqa
+        - ./observation/matrix/indptr                           : (M+1,) dataset of int32  # noqa
+        - ./observation/metadata                                : Group  # noqa
+        - [./observation/metadata/foo]                          : Optional, (N,) dataset of any valid HDF5 type in index order with IDs.  # noqa
+        - ./observation/group-metadata                          : Group  # noqa
+        - [./observation/group-metadata/foo]                    : Optional, (?,) dataset of group metadata that relates IDs  # noqa
+        - [./observation/group-metadata/foo.attrs['data_type']] : attribute of the foo dataset that describes contained type (e.g., newick)  # noqa
+        - ./sample                                              : Group  # noqa
+        - ./sample/ids                                          : (M,) dataset of str or vlen str  # noqa
+        - ./sample/matrix                                       : Group  # noqa
+        - ./sample/matrix/data                                  : (nnz,) dataset of float64  # noqa
+        - ./sample/matrix/indices                               : (nnz,) dataset of int32  # noqa
+        - ./sample/matrix/indptr                                : (N+1,) dataset of int32  # noqa
+        - ./sample/metadata                                     : Group  # noqa
+        - [./sample/metadata/foo]                               : Optional, (M,) dataset of any valid HDF5 type in index order with IDs.  # noqa
+        - ./sample/group-metadata                               : Group  # noqa
+        - [./sample/group-metadata/foo]                         : Optional, (?,) dataset of group metadata that relates IDs  # noqa
+        - [./sample/group-metadata/foo.attrs['data_type']]      : attribute of the foo dataset that describes contained type (e.g., newick)  # noqa
 
         The '?' character on the dataset size means that it can be of arbitrary
         length.
@@ -3991,10 +4005,11 @@ dataset of int32
         Parameters
         ----------
         h5grp : a h5py ``Group`` or an open h5py ``File``
+            The object to load from
         ids : iterable
             The sample/observation ids of the samples/observations that we need
             to retrieve from the hdf5 biom table
-        axis : {'sample', 'observation'}, optional
+        axis : 'sample', 'observation', optional
             The axis to subset on
         parse_fs : dict, optional
             Specify custom parsing functions for metadata fields. This dict is
@@ -4022,11 +4037,7 @@ dataset of int32
 
         References
         ----------
-        .. [1] http://docs.scipy.org/doc/scipy-0.13.0/reference/generated/sci\
-py.sparse.csr_matrix.html
-        .. [2] http://docs.scipy.org/doc/scipy-0.13.0/reference/generated/sci\
-py.sparse.csc_matrix.html
-        .. [3] http://biom-format.org/documentation/format_versions/biom-2.0.\
+        .. [1] http://biom-format.org/documentation/format_versions/biom-2.1.\
 html
 
         See Also
@@ -4049,11 +4060,6 @@ html
         >>>     t = Table.from_hdf5(f, ids=["GG_OTU_1"],
         ...                         axis='observation') # doctest: +SKIP
         """
-        if not HAVE_H5PY:
-            raise RuntimeError("h5py is not in the environment, HDF5 support "
-                               "is not available")
-
-        import h5py
         if not isinstance(h5grp, (h5py.Group, h5py.File)):
             raise ValueError("h5grp does not appear to be an HDF5 file or "
                              "group")
@@ -4104,6 +4110,12 @@ html
         create_date = h5grp.attrs['creation-date']
         generated_by = h5grp.attrs['generated-by']
 
+        if hasattr(datetime, "fromisoformat"):
+            try:
+                create_date = datetime.fromisoformat(create_date)
+            except (TypeError, ValueError):
+                pass
+
         shape = h5grp.attrs['shape']
         type_ = None if h5grp.attrs['type'] == '' else h5grp.attrs['type']
 
@@ -4112,6 +4124,12 @@ html
 
         if isinstance(type_, bytes):
             type_ = type_.decode('ascii')
+
+        def ensure_utf8(x):
+            if isinstance(x, bytes):
+                return x.decode('utf8')
+            else:
+                return
 
         def axis_load(grp):
             """Loads all the data of the given group"""
@@ -4141,7 +4159,7 @@ html
             md = md if any(md) else None
 
             # Fetch the group metadata
-            grp_md = {cat: val
+            grp_md = {cat: ensure_utf8(val[0])
                       for cat, val in grp['group-metadata'].items()}
             return ids, md, grp_md
 
@@ -4210,10 +4228,10 @@ html
             indptr[0] = 0
             indptr[1:] = indptr_subset.cumsum()
 
-            data = np.hstack(h5_data[start:end]
-                             for start, end in indptr_indices)
-            indices = np.hstack(h5_indices[start:end]
-                                for start, end in indptr_indices)
+            data = np.hstack([h5_data[start:end]
+                              for start, end in indptr_indices])
+            indices = np.hstack([h5_indices[start:end]
+                                 for start, end in indptr_indices])
         else:
             # no subset need, just pass all data to scipy
             data = h5_data
@@ -4381,10 +4399,9 @@ html
 
         mcols = []
         for test in md:
-            kv_test = sorted(list(test.items()))
             columns = []
             expand = {}
-            for key, value in kv_test:
+            for key, value in test.items():
                 if isinstance(value, (tuple, list)):
                     expand[key] = True
                     for idx in range(len(value)):
@@ -4398,7 +4415,7 @@ html
         rows = []
         for m in md:
             row = []
-            for key, value in sorted(m.items()):
+            for key, value in m.items():
                 if expand[key]:
                     for v in value:
                         row.append(v)
@@ -4408,7 +4425,8 @@ html
 
         return pd.DataFrame(rows, index=self.ids(axis=axis), columns=mcols)
 
-    def to_hdf5(self, h5grp, generated_by, compress=True, format_fs=None):
+    def to_hdf5(self, h5grp, generated_by, compress=True, format_fs=None,
+                creation_date=None):
         """Store CSC and CSR in place
 
         The resulting structure of this group is below. A few basic
@@ -4419,6 +4437,8 @@ html
 
         Notes
         -----
+        This method does not return anything and operates in place on h5grp.
+
         The expected HDF5 group structure is below. An example of an HDF5 file
         in DDL can be found here [3]_.
 
@@ -4505,10 +4525,9 @@ dataset of int32
             the category being operated on, the metadata for the entire axis
             being operated on, and whether to enable compression on the
             dataset.  Anything returned by this function is ignored.
-
-        Notes
-        -----
-        This method does not return anything and operates in place on h5grp.
+        creation_date : datetime, optional
+            If provided, use this specific datetime on write as the creation
+            timestamp
 
         See Also
         --------
@@ -4533,10 +4552,6 @@ html
         ...     t.to_hdf5(f, "example")
 
         """
-        if not HAVE_H5PY:
-            raise RuntimeError("h5py is not in the environment, HDF5 support "
-                               "is not available")
-
         if format_fs is None:
             format_fs = {}
 
@@ -4548,7 +4563,10 @@ html
         h5grp.attrs['format-url'] = "http://biom-format.org"
         h5grp.attrs['format-version'] = self.format_version
         h5grp.attrs['generated-by'] = generated_by
-        h5grp.attrs['creation-date'] = datetime.now().isoformat()
+        if creation_date is None:
+            h5grp.attrs['creation-date'] = datetime.now().isoformat()
+        else:
+            h5grp.attrs['creation-date'] = creation_date.isoformat()
         h5grp.attrs['shape'] = self.shape
         h5grp.attrs['nnz'] = nnz
 
@@ -4723,7 +4741,7 @@ html
                           input_is_dense=input_is_dense)
         return table_obj
 
-    def to_json(self, generated_by, direct_io=None):
+    def to_json(self, generated_by, direct_io=None, creation_date=None):
         """Returns a JSON string representing the table in BIOM format.
 
         Parameters
@@ -4734,6 +4752,8 @@ html
             Defaults to ``None``. Must implementing a ``write`` function. If
             `direct_io` is not ``None``, the final output is written directly
             to `direct_io` during processing.
+        creation_date : datetime, optional
+            If provided, use this datetime as the creation date on write.
 
         Returns
         -------
@@ -4742,6 +4762,11 @@ html
         """
         if not isinstance(generated_by, str):
             raise TableException("Must specify a generated_by string")
+
+        if creation_date is None:
+            creation_date = datetime.now().isoformat()
+        else:
+            creation_date = creation_date.isoformat()
 
         # Fill in top-level metadata.
         if direct_io:
@@ -4754,14 +4779,14 @@ html
                 '"format_url": "%s",' %
                 get_biom_format_url_string())
             direct_io.write('"generated_by": "%s",' % generated_by)
-            direct_io.write('"date": "%s",' % datetime.now().isoformat())
+            direct_io.write('"date": "%s",' % creation_date)
         else:
             id_ = '"id": "%s",' % str(self.table_id)
             format_ = '"format": "%s",' % get_biom_format_version_string(
                 (1, 0))  # JSON table -> 1.0.0
             format_url = '"format_url": "%s",' % get_biom_format_url_string()
             generated_by = '"generated_by": "%s",' % generated_by
-            date = '"date": "%s",' % datetime.now().isoformat()
+            date = '"date": "%s",' % creation_date
 
         # Determine if we have any data in the matrix, and what the shape of
         # the matrix is.
@@ -5061,6 +5086,7 @@ html
         delim: string
             delimeter in file lines
         dtype: type
+            The expected type
         md_parse:  function or None
             funtion used to parse metdata
 

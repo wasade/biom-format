@@ -32,7 +32,7 @@ __copyright__ = "Copyright 2011-2020, The BIOM Format Development Team"
 __credits__ = ["Greg Caporaso", "Daniel McDonald", "Jose Clemente",
                "Jai Ram Rideout", "Jorge Cañardo Alastuey", "Michael Hall"]
 __license__ = "BSD"
-__version__ = "2.1.13"
+__version__ = "2.1.15-dev"
 __maintainer__ = "Daniel McDonald"
 __email__ = "mcdonadt@colorado.edu"
 
@@ -116,9 +116,7 @@ install_requires = [
     "numpy >= 1.9.2",
     "scipy >= 1.3.1",
     'pandas >= 0.20.0',
-    "cython >= 0.29",
     "h5py",
-    "cython"
 ]
 
 if sys.version_info[0] < 3:

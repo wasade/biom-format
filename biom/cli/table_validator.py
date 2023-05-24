@@ -9,6 +9,7 @@
 
 import json
 import sys
+import h5py
 from datetime import datetime
 from operator import and_
 from functools import reduce
@@ -17,13 +18,13 @@ import click
 import numpy as np
 
 from biom.cli import cli
-from biom.util import HAVE_H5PY, biom_open, is_hdf5_file
+from biom.util import biom_open, is_hdf5_file
 
 
 @cli.command(name='validate-table')
 @click.option('-i', '--input-fp', required=True,
               type=click.Path(exists=True, dir_okay=False),
-              help='The input filpath to validate against the BIOM format'
+              help='The input filepath to validate against the BIOM format'
                    ' specification')
 @click.option('-f', '--format-version', default=None,
               help='The specific format version to validate against')
@@ -94,10 +95,16 @@ class TableValidator:
 
         with biom_open(kwargs['table']) as f:
             if is_json:
-                kwargs['table'] = json.load(f)
+                try:
+                    kwargs['table'] = json.load(f)
+                except ValueError:
+                    # if we hit this, we've already determined the file is
+                    # not hdf5, so if it also is not json then it cannot be
+                    # a valid biom-format file with the current formats.
+                    raise ValueError("The provided table does not appear to "
+                                     "be biom-format 1.0.0, 2.0.0 or 2.1.0.")
                 return self._validate_json(**kwargs)
-            elif HAVE_H5PY:
-                import h5py
+            else:
                 kwargs['table'] = f
 
                 if not isinstance(f, h5py.File):
@@ -105,9 +112,6 @@ class TableValidator:
                           "table does not appear to be in HDF5 format!")
                     sys.exit(1)
                 return self._validate_hdf5(**kwargs)
-            else:
-                raise OSError("h5py is not installed, can only validate JSON "
-                              "tables")
 
     def __call__(self, table, format_version=None):
         return self.run(table=table, format_version=format_version)
@@ -155,10 +159,12 @@ class TableValidator:
 
         for group in required_groups:
             if group not in table:
+                report_lines.append("Missing required '%s' group" % group)
                 valid_table = False
 
         for dataset in required_datasets:
             if dataset not in table:
+                report_lines.append("Missing required '%s' dataset" % dataset)
                 valid_table = False
 
         if 'shape' in table.attrs:
@@ -186,6 +192,7 @@ class TableValidator:
                 report_lines.append("Number of sample IDs is not equal "
                                     "to the described shape")
         else:
+            report_lines.append("Missing 'shape' attribute")
             valid_table = False
 
         if 'format-version' in table.attrs:
